@@ -885,7 +885,7 @@ interface ParsedIssueAssigneeAdapterOverrides {
 
 export type ResolvedWorkspaceForRun = {
   cwd: string;
-  source: "project_primary" | "task_session" | "agent_home";
+  source: "project_primary" | "task_session" | "adapter_config" | "agent_home";
   projectId: string | null;
   workspaceId: string | null;
   repoUrl: string | null;
@@ -2539,6 +2539,26 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           workspaceId: readNonEmptyString(previousSessionParams?.workspaceId),
           repoUrl: readNonEmptyString(previousSessionParams?.repoUrl),
           repoRef: readNonEmptyString(previousSessionParams?.repoRef),
+          workspaceHints,
+          warnings: [],
+        };
+      }
+    }
+
+    const adapterCwd = readNonEmptyString(parseObject(agent.adapterConfig).cwd);
+    if (adapterCwd) {
+      const adapterCwdExists = await fs
+        .stat(adapterCwd)
+        .then((stats) => stats.isDirectory())
+        .catch(() => false);
+      if (adapterCwdExists) {
+        return {
+          cwd: adapterCwd,
+          source: "adapter_config" as const,
+          projectId: resolvedProjectId,
+          workspaceId: null,
+          repoUrl: null,
+          repoRef: null,
           workspaceHints,
           warnings: [],
         };
