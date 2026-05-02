@@ -3096,6 +3096,7 @@ export function IssueChatThread({
   const bottomAnchorRef = useRef<HTMLDivElement | null>(null);
   const composerViewportAnchorRef = useRef<HTMLDivElement | null>(null);
   const composerViewportSnapshotRef = useRef<ReturnType<typeof captureComposerViewportSnapshot>>(null);
+  const jumpToLatestSettleTimeoutsRef = useRef<number[]>([]);
   const preserveComposerViewportRef = useRef(false);
   const pendingSubmitScrollRef = useRef(false);
   const lastUserMessageIdRef = useRef<string | null>(null);
@@ -3383,9 +3384,14 @@ export function IssueChatThread({
 
     if (typeof window === "undefined") return;
 
+    jumpToLatestSettleTimeoutsRef.current.forEach((timeoutId) => {
+      window.clearTimeout(timeoutId);
+    });
+    jumpToLatestSettleTimeoutsRef.current = [];
+
     const settleDelays = [380, 760, 1140];
     settleDelays.forEach((delay) => {
-      window.setTimeout(() => {
+      const timeoutId = window.setTimeout(() => {
         const el = document.getElementById(latestCommentAnchor);
         if (el) {
           el.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -3399,8 +3405,19 @@ export function IssueChatThread({
           behavior: "auto",
         });
       }, delay);
+      jumpToLatestSettleTimeoutsRef.current.push(timeoutId);
     });
   }
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    return () => {
+      jumpToLatestSettleTimeoutsRef.current.forEach((timeoutId) => {
+        window.clearTimeout(timeoutId);
+      });
+      jumpToLatestSettleTimeoutsRef.current = [];
+    };
+  }, []);
 
   function handleJumpToLatest() {
     if (onRefreshLatestComments) {
