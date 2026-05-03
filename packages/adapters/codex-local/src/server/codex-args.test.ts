@@ -57,13 +57,28 @@ describe("buildCodexExecArgs", () => {
     expect(result.fastModeRequested).toBe(true);
     expect(result.fastModeApplied).toBe(false);
     expect(result.fastModeIgnoredReason).toContain(
-      "currently only supported on gpt-5.4 or manually configured model IDs",
+      "currently only supported on gpt-5.5, gpt-5.4 or manually configured model IDs",
     );
     expect(result.args).toEqual([
       "exec",
       "--json",
       "--model",
       "gpt-5.3-codex",
+      "-",
+    ]);
+  });
+
+  it("omits --model for dynamic latest when it has not been resolved yet", () => {
+    const result = buildCodexExecArgs({
+      model: "latest",
+      fastMode: true,
+    });
+
+    expect(result.fastModeRequested).toBe(true);
+    expect(result.fastModeApplied).toBe(false);
+    expect(result.args).toEqual([
+      "exec",
+      "--json",
       "-",
     ]);
   });

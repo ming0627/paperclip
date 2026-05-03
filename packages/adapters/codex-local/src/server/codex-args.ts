@@ -1,6 +1,7 @@
 import { asBoolean, asString, asStringArray } from "@paperclipai/adapter-utils/server-utils";
 import {
   CODEX_LOCAL_FAST_MODE_SUPPORTED_MODELS,
+  CODEX_LOCAL_DYNAMIC_MODEL,
   isCodexLocalFastModeSupported,
 } from "../index.js";
 
@@ -24,6 +25,10 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function isDynamicModel(model: string): boolean {
+  return model === CODEX_LOCAL_DYNAMIC_MODEL || model === "auto" || model === "codex-latest";
+}
+
 function formatFastModeSupportedModels(): string {
   return `${CODEX_LOCAL_FAST_MODE_SUPPORTED_MODELS.join(", ")} or manually configured model IDs`;
 }
@@ -33,7 +38,8 @@ export function buildCodexExecArgs(
   options: { resumeSessionId?: string | null } = {},
 ): BuildCodexExecArgsResult {
   const record = asRecord(config);
-  const model = asString(record.model, "").trim();
+  const requestedModel = asString(record.model, "").trim();
+  const model = isDynamicModel(requestedModel) ? "" : requestedModel;
   const modelReasoningEffort = asString(
     record.modelReasoningEffort,
     asString(record.reasoningEffort, ""),

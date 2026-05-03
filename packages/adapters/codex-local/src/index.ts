@@ -1,8 +1,10 @@
 export const type = "codex_local";
 export const label = "Codex (local)";
-export const DEFAULT_CODEX_LOCAL_MODEL = "gpt-5.3-codex";
+export const CODEX_LOCAL_DYNAMIC_MODEL = "latest";
+export const DEFAULT_CODEX_LOCAL_MODEL = CODEX_LOCAL_DYNAMIC_MODEL;
+export const FALLBACK_CODEX_LOCAL_RESOLVED_MODEL = "gpt-5.5";
 export const DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX = true;
-export const CODEX_LOCAL_FAST_MODE_SUPPORTED_MODELS = ["gpt-5.4"] as const;
+export const CODEX_LOCAL_FAST_MODE_SUPPORTED_MODELS = ["gpt-5.5", "gpt-5.4"] as const;
 
 function normalizeModelId(model: string | null | undefined): string {
   return typeof model === "string" ? model.trim() : "";
@@ -28,8 +30,10 @@ export function isCodexLocalFastModeSupported(model: string | null | undefined):
 }
 
 export const models = [
+  { id: CODEX_LOCAL_DYNAMIC_MODEL, label: "Latest Codex (local default)" },
+  { id: FALLBACK_CODEX_LOCAL_RESOLVED_MODEL, label: FALLBACK_CODEX_LOCAL_RESOLVED_MODEL },
   { id: "gpt-5.4", label: "gpt-5.4" },
-  { id: DEFAULT_CODEX_LOCAL_MODEL, label: DEFAULT_CODEX_LOCAL_MODEL },
+  { id: "gpt-5.3-codex", label: "gpt-5.3-codex" },
   { id: "gpt-5.3-codex-spark", label: "gpt-5.3-codex-spark" },
   { id: "gpt-5", label: "gpt-5" },
   { id: "o3", label: "o3" },
@@ -47,7 +51,7 @@ Adapter: codex_local
 Core fields:
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)
 - instructionsFilePath (string, optional): absolute path to a markdown instructions file prepended to stdin prompt at runtime
-- model (string, optional): Codex model id
+- model (string, optional): Codex model id. Use "latest" to resolve from PAPERCLIP_CODEX_MODEL, then the host Codex config.toml model, then the adapter fallback.
 - modelReasoningEffort (string, optional): reasoning effort override (minimal|low|medium|high|xhigh) passed via -c model_reasoning_effort=...
 - promptTemplate (string, optional): run prompt template
 - search (boolean, optional): run codex with --search
@@ -71,5 +75,6 @@ Notes:
 - Unless explicitly overridden in adapter config, Paperclip runs Codex with a per-company managed CODEX_HOME under the active Paperclip instance and seeds auth/config from the shared Codex home (the CODEX_HOME env var, when set, or ~/.codex).
 - Some model/tool combinations reject certain effort levels (for example minimal with web search enabled).
 - Fast mode is supported on GPT-5.4 and manual model IDs. When enabled for those models, Paperclip applies \`service_tier="fast"\` and \`features.fast_mode=true\`.
+- The "latest" model selector is resolved at run time on the host, so updating the Mac Mini Codex default updates future Paperclip Codex runs without editing each agent.
 - When Paperclip realizes a workspace/runtime for a run, it injects PAPERCLIP_WORKSPACE_* and PAPERCLIP_RUNTIME_* env vars for agent-side tooling.
 `;
