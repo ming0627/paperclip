@@ -2,6 +2,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, notInArray, sql } from "drizzl
 import type { Db } from "@paperclipai/db";
 import { clampIssueRequestDepth } from "@paperclipai/shared";
 import {
+  activityLog,
   agents,
   companies,
   costEvents,
@@ -22,6 +23,9 @@ export const DEFAULT_PRODUCTIVITY_REVIEW_LONG_ACTIVE_HOURS = 6;
 export const DEFAULT_PRODUCTIVITY_REVIEW_HIGH_CHURN_HOURLY = 10;
 export const DEFAULT_PRODUCTIVITY_REVIEW_HIGH_CHURN_SIX_HOURS = 30;
 export const DEFAULT_PRODUCTIVITY_REVIEW_RESOLVED_SNOOZE_MS = 6 * 60 * 60 * 1000;
+export const DEFAULT_PRODUCTIVITY_REVIEW_MAX_REFRESH_ATTEMPTS = 3;
+export const PRODUCTIVITY_REVIEW_REFRESH_CAPPED_ACTIVITY_ACTION = "issue.productivity_review_refresh_capped";
+const PRODUCTIVITY_REVIEW_UPDATED_ACTIVITY_ACTION = "issue.productivity_review_updated";
 
 const TERMINAL_RUN_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"] as const;
 const ACTIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
@@ -40,6 +44,7 @@ type ProductivityReviewThresholds = {
   highChurnHourly: number;
   highChurnSixHours: number;
   resolvedSnoozeMs: number;
+  maxRefreshAttempts: number;
 };
 
 type ProductivityReviewEvidence = {
@@ -142,6 +147,10 @@ function buildThresholds(overrides?: Partial<ProductivityReviewThresholds>): Pro
       overrides?.resolvedSnoozeMs ?? DEFAULT_PRODUCTIVITY_REVIEW_RESOLVED_SNOOZE_MS,
       DEFAULT_PRODUCTIVITY_REVIEW_RESOLVED_SNOOZE_MS,
     ),
+    maxRefreshAttempts: readPositiveInteger(
+      overrides?.maxRefreshAttempts ?? DEFAULT_PRODUCTIVITY_REVIEW_MAX_REFRESH_ATTEMPTS,
+      DEFAULT_PRODUCTIVITY_REVIEW_MAX_REFRESH_ATTEMPTS,
+    ),
   };
 }
 
@@ -164,6 +173,22 @@ function formatTrigger(trigger: ProductivityReviewTrigger) {
   if (trigger === "no_comment_streak") return "No-comment streak";
   if (trigger === "high_churn") return "High churn";
   return "Long active duration";
+}
+
+export function shouldCapProductivityReviewRefresh(input: {
+  updateAttempts: number;
+  capAlerts: number;
+  maxRefreshAttempts?: number;
+}) {
+  const maxRefreshAttempts = readPositiveInteger(
+    input.maxRefreshAttempts ?? DEFAULT_PRODUCTIVITY_REVIEW_MAX_REFRESH_ATTEMPTS,
+    DEFAULT_PRODUCTIVITY_REVIEW_MAX_REFRESH_ATTEMPTS,
+  );
+  const capped = input.updateAttempts >= maxRefreshAttempts;
+  return {
+    capped,
+    shouldAlert: capped && input.capAlerts <= 0,
+  };
 }
 
 export function productivityReviewService(db: Db, deps?: { enqueueWakeup?: EnqueueWakeup }) {
@@ -247,6 +272,21 @@ export function productivityReviewService(db: Db, deps?: { enqueueWakeup?: Enque
       .orderBy(desc(issues.updatedAt))
       .limit(1)
       .then((rows) => rows[0] ?? null);
+  }
+
+  async function countReviewActivities(companyId: string, reviewIssueId: string, action: string) {
+    return db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.companyId, companyId),
+          eq(activityLog.entityType, "issue"),
+          eq(activityLog.entityId, reviewIssueId),
+          eq(activityLog.action, action),
+        ),
+      )
+      .then((rows) => Number(rows[0]?.count ?? 0));
   }
 
   async function countIssueRunsSince(companyId: string, agentId: string, issueId: string, since: Date) {
@@ -538,16 +578,47 @@ export function productivityReviewService(db: Db, deps?: { enqueueWakeup?: Enque
 
   async function createOrUpdateReview(
     evidence: ProductivityReviewEvidence,
-    opts: { prefix: string },
+    opts: { prefix: string; thresholds: ProductivityReviewThresholds },
   ) {
     const existing = await findOpenProductivityReview(evidence.sourceIssue.companyId, evidence.sourceIssue.id);
     if (existing) {
+      const [updateAttempts, capAlerts] = await Promise.all([
+        countReviewActivities(evidence.sourceIssue.companyId, existing.id, PRODUCTIVITY_REVIEW_UPDATED_ACTIVITY_ACTION),
+        countReviewActivities(evidence.sourceIssue.companyId, existing.id, PRODUCTIVITY_REVIEW_REFRESH_CAPPED_ACTIVITY_ACTION),
+      ]);
+      const cap = shouldCapProductivityReviewRefresh({
+        updateAttempts,
+        capAlerts,
+        maxRefreshAttempts: opts.thresholds.maxRefreshAttempts,
+      });
+      if (cap.capped) {
+        if (cap.shouldAlert) {
+          await logActivity(db, {
+            companyId: evidence.sourceIssue.companyId,
+            actorType: "system",
+            actorId: "system",
+            action: PRODUCTIVITY_REVIEW_REFRESH_CAPPED_ACTIVITY_ACTION,
+            entityType: "issue",
+            entityId: existing.id,
+            agentId: existing.assigneeAgentId,
+            details: {
+              source: "productivity_review.reconcile",
+              sourceIssueId: evidence.sourceIssue.id,
+              maxRefreshAttempts: opts.thresholds.maxRefreshAttempts,
+              trigger: evidence.trigger,
+              noCommentStreak: evidence.noCommentStreak,
+            },
+          });
+          return { kind: "refresh_capped" as const, reviewIssueId: existing.id };
+        }
+        return { kind: "existing" as const, reviewIssueId: existing.id };
+      }
       await issuesSvc.addComment(existing.id, buildRefreshComment(evidence, opts.prefix), {});
       await logActivity(db, {
         companyId: evidence.sourceIssue.companyId,
         actorType: "system",
         actorId: "system",
-        action: "issue.productivity_review_updated",
+        action: PRODUCTIVITY_REVIEW_UPDATED_ACTIVITY_ACTION,
         entityType: "issue",
         entityId: existing.id,
         agentId: existing.assigneeAgentId,
@@ -665,6 +736,7 @@ export function productivityReviewService(db: Db, deps?: { enqueueWakeup?: Enque
       scanned: candidates.length,
       created: 0,
       updated: 0,
+      refreshCapped: 0,
       existing: 0,
       snoozed: 0,
       skipped: 0,
@@ -703,9 +775,10 @@ export function productivityReviewService(db: Db, deps?: { enqueueWakeup?: Enque
         prefixCache.set(candidate.companyId, prefix);
       }
       try {
-        const outcome = await createOrUpdateReview(evidence, { prefix });
+        const outcome = await createOrUpdateReview(evidence, { prefix, thresholds });
         if (outcome.kind === "created") result.created += 1;
         else if (outcome.kind === "updated") result.updated += 1;
+        else if (outcome.kind === "refresh_capped") result.refreshCapped += 1;
         else result.existing += 1;
         result.reviewIssueIds.push(outcome.reviewIssueId);
       } catch (err) {

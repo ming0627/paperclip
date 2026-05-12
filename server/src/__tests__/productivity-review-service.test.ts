@@ -16,7 +16,9 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { MAX_ISSUE_REQUEST_DEPTH } from "@paperclipai/shared";
 import {
+  DEFAULT_PRODUCTIVITY_REVIEW_MAX_REFRESH_ATTEMPTS,
   DEFAULT_PRODUCTIVITY_REVIEW_NO_COMMENT_STREAK_RUNS,
+  PRODUCTIVITY_REVIEW_REFRESH_CAPPED_ACTIVITY_ACTION,
   PRODUCTIVITY_REVIEW_ORIGIN_KIND,
   productivityReviewService,
 } from "../services/productivity-review.ts";
@@ -196,6 +198,44 @@ describeEmbeddedPostgres("productivity review service", () => {
       .from(issueComments)
       .where(eq(issueComments.issueId, reviews[0]!.id));
     expect(comments.some((comment) => comment.body.includes("Productivity review evidence refreshed"))).toBe(true);
+  });
+
+  it("stops refreshing an open productivity review after the max retry guard trips", async () => {
+    const now = new Date("2026-04-28T12:00:00.000Z");
+    const seeded = await seedAssignedIssue();
+    await insertRuns({
+      companyId: seeded.companyId,
+      agentId: seeded.coderId,
+      issueId: seeded.issueId,
+      count: DEFAULT_PRODUCTIVITY_REVIEW_NO_COMMENT_STREAK_RUNS,
+      now,
+    });
+
+    const service = productivityReviewService(db);
+    await service.reconcileProductivityReviews({ now, companyId: seeded.companyId });
+    const [review] = await listProductivityReviews(seeded.companyId);
+
+    for (let index = 0; index < DEFAULT_PRODUCTIVITY_REVIEW_MAX_REFRESH_ATTEMPTS; index += 1) {
+      const refreshed = await service.reconcileProductivityReviews({ now, companyId: seeded.companyId });
+      expect(refreshed.updated).toBe(1);
+      expect(refreshed.refreshCapped).toBe(0);
+    }
+
+    const capped = await service.reconcileProductivityReviews({ now, companyId: seeded.companyId });
+    const cappedAgain = await service.reconcileProductivityReviews({ now, companyId: seeded.companyId });
+
+    expect(capped.updated).toBe(0);
+    expect(capped.refreshCapped).toBe(1);
+    expect(capped.reviewIssueIds).toEqual([review!.id]);
+    expect(cappedAgain.updated).toBe(0);
+    expect(cappedAgain.refreshCapped).toBe(0);
+    expect(cappedAgain.existing).toBe(1);
+
+    const capActivities = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.entityId, review!.id), eq(activityLog.action, PRODUCTIVITY_REVIEW_REFRESH_CAPPED_ACTIVITY_ACTION)));
+    expect(capActivities).toHaveLength(1);
   });
 
   it("creates a long-active review without enabling a continuation hold", async () => {

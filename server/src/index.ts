@@ -707,8 +707,8 @@ export async function startServer(): Promise<StartedServer> {
       })
       .then(async () => {
         const reviewed = await heartbeat.reconcileProductivityReviews();
-        if (reviewed.created > 0 || reviewed.updated > 0 || reviewed.failed > 0) {
-          logger.warn({ ...reviewed }, "startup productivity reconciliation created or updated review work");
+        if (reviewed.created > 0 || reviewed.updated > 0 || reviewed.refreshCapped > 0 || reviewed.failed > 0) {
+          logger.warn({ ...reviewed }, "startup productivity reconciliation created, updated, or capped review work");
         }
       })
       .catch((err) => {
@@ -772,8 +772,8 @@ export async function startServer(): Promise<StartedServer> {
         })
         .then(async () => {
           const reviewed = await heartbeat.reconcileProductivityReviews();
-          if (reviewed.created > 0 || reviewed.updated > 0 || reviewed.failed > 0) {
-            logger.warn({ ...reviewed }, "periodic productivity reconciliation created or updated review work");
+          if (reviewed.created > 0 || reviewed.updated > 0 || reviewed.refreshCapped > 0 || reviewed.failed > 0) {
+            logger.warn({ ...reviewed }, "periodic productivity reconciliation created, updated, or capped review work");
           }
         })
         .catch((err) => {
