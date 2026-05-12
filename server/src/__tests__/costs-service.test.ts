@@ -52,6 +52,7 @@ const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockFetchAllQuotaWindows = vi.hoisted(() => vi.fn());
 const mockCostService = vi.hoisted(() => ({
   createEvent: vi.fn(),
+  listEvents: vi.fn().mockResolvedValue({ rows: [], nextCursor: null }),
   summary: vi.fn().mockResolvedValue({ spendCents: 0 }),
   byAgent: vi.fn().mockResolvedValue([]),
   byAgentModel: vi.fn().mockResolvedValue([]),
@@ -198,6 +199,57 @@ describe("cost routes", () => {
       netCents: 0,
       estimatedDebitCents: 0,
       eventCount: 0,
+    });
+  });
+
+  it("returns paginated raw cost events with filters", async () => {
+    mockCostService.listEvents.mockResolvedValueOnce({
+      rows: [
+        {
+          id: "cost-event-1",
+          companyId: "company-1",
+          agentId: "agent-1",
+          provider: "openai",
+          biller: "openai",
+          billingType: "metered_api",
+          model: "gpt-5",
+          inputTokens: 100,
+          cachedInputTokens: 10,
+          outputTokens: 50,
+          costCents: 12,
+          occurredAt: "2026-05-12T01:00:00.000Z",
+          createdAt: "2026-05-12T01:00:01.000Z",
+        },
+      ],
+      nextCursor: "opaque-next",
+    });
+    const app = await createApp();
+
+    const res = await request(app)
+      .get("/api/companies/company-1/cost_events")
+      .query({
+        agentId: "agent-1",
+        model: "gpt-5",
+        since: "2026-05-12T00:00:00.000Z",
+        limit: "5",
+        cursor: "opaque-cursor",
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([
+      expect.objectContaining({
+        id: "cost-event-1",
+        agentId: "agent-1",
+        model: "gpt-5",
+      }),
+    ]);
+    expect(res.headers["x-next-cursor"]).toBe("opaque-next");
+    expect(mockCostService.listEvents).toHaveBeenCalledWith("company-1", {
+      agentId: "agent-1",
+      model: "gpt-5",
+      since: new Date("2026-05-12T00:00:00.000Z"),
+      limit: 5,
+      cursor: "opaque-cursor",
     });
   });
 

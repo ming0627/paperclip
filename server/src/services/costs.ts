@@ -1,7 +1,7 @@
-import { and, desc, eq, gte, isNotNull, lt, lte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, isNotNull, lt, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, agents, companies, costEvents, issues, projects } from "@paperclipai/db";
-import { notFound, unprocessable } from "../errors.js";
+import { badRequest, notFound, unprocessable } from "../errors.js";
 import { budgetService, type BudgetServiceHooks } from "./budgets.js";
 
 export interface CostDateRange {
@@ -9,8 +9,34 @@ export interface CostDateRange {
   to?: Date;
 }
 
+export interface CostEventListFilters {
+  agentId?: string;
+  model?: string;
+  since?: Date;
+  limit?: number;
+  cursor?: string;
+}
+
 const METERED_BILLING_TYPE = "metered_api";
 const SUBSCRIPTION_BILLING_TYPES = ["subscription_included", "subscription_overage"] as const;
+
+function encodeCostEventCursor(row: Pick<typeof costEvents.$inferSelect, "createdAt" | "id">) {
+  return Buffer.from(JSON.stringify({ createdAt: row.createdAt.toISOString(), id: row.id }), "utf8").toString("base64url");
+}
+
+function decodeCostEventCursor(cursor: string) {
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid cursor");
+    const record = parsed as Record<string, unknown>;
+    if (typeof record.id !== "string" || typeof record.createdAt !== "string") throw new Error("invalid cursor");
+    const createdAt = new Date(record.createdAt);
+    if (isNaN(createdAt.getTime())) throw new Error("invalid cursor");
+    return { createdAt, id: record.id };
+  } catch {
+    throw badRequest("invalid 'cursor' value");
+  }
+}
 
 function sumAsNumber(column: typeof costEvents.costCents | typeof costEvents.inputTokens | typeof costEvents.cachedInputTokens | typeof costEvents.outputTokens) {
   return sql<number>`coalesce(sum(${column}), 0)::double precision`;
@@ -98,6 +124,37 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       await budgets.evaluateCostEvent(event);
 
       return event;
+    },
+
+    listEvents: async (companyId: string, filters: CostEventListFilters = {}) => {
+      const limit = Math.min(Math.max(Math.floor(filters.limit ?? 100), 1), 1000);
+      const conditions = [eq(costEvents.companyId, companyId)];
+      if (filters.agentId) conditions.push(eq(costEvents.agentId, filters.agentId));
+      if (filters.model) conditions.push(eq(costEvents.model, filters.model));
+      if (filters.since) conditions.push(gte(costEvents.createdAt, filters.since));
+      if (filters.cursor) {
+        const cursor = decodeCostEventCursor(filters.cursor);
+        conditions.push(
+          or(
+            lt(costEvents.createdAt, cursor.createdAt),
+            and(eq(costEvents.createdAt, cursor.createdAt), lt(costEvents.id, cursor.id)),
+          )!,
+        );
+      }
+
+      const rows = await db
+        .select()
+        .from(costEvents)
+        .where(and(...conditions))
+        .orderBy(desc(costEvents.createdAt), desc(costEvents.id))
+        .limit(limit + 1);
+      const pageRows = rows.slice(0, limit);
+      return {
+        rows: pageRows,
+        nextCursor: rows.length > limit && pageRows.length > 0
+          ? encodeCostEventCursor(pageRows[pageRows.length - 1]!)
+          : null,
+      };
     },
 
     summary: async (companyId: string, range?: CostDateRange) => {

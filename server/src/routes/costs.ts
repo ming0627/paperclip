@@ -42,6 +42,38 @@ export function parseCostLimit(query: Record<string, unknown>) {
   return limit;
 }
 
+function firstQueryValue(value: unknown) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+export function parseCostEventListQuery(query: Record<string, unknown>) {
+  const agentIdRaw = firstQueryValue(query.agentId);
+  const modelRaw = firstQueryValue(query.model);
+  const sinceRaw = firstQueryValue(query.since);
+  const cursorRaw = firstQueryValue(query.cursor);
+  const limitRaw = firstQueryValue(query.limit);
+  const since = typeof sinceRaw === "string" && sinceRaw.trim() ? new Date(sinceRaw) : undefined;
+  if (since && isNaN(since.getTime())) throw badRequest("invalid 'since' date");
+  if (limitRaw == null || limitRaw === "") {
+    return {
+      agentId: typeof agentIdRaw === "string" && agentIdRaw.trim() ? agentIdRaw.trim() : undefined,
+      model: typeof modelRaw === "string" && modelRaw.trim() ? modelRaw.trim() : undefined,
+      since,
+      limit: 100,
+      cursor: typeof cursorRaw === "string" && cursorRaw.trim() ? cursorRaw.trim() : undefined,
+    };
+  }
+  const parsedLimit = typeof limitRaw === "number" ? limitRaw : Number.parseInt(String(limitRaw), 10);
+  if (!Number.isFinite(parsedLimit) || parsedLimit <= 0) throw badRequest("invalid 'limit' value");
+  return {
+    agentId: typeof agentIdRaw === "string" && agentIdRaw.trim() ? agentIdRaw.trim() : undefined,
+    model: typeof modelRaw === "string" && modelRaw.trim() ? modelRaw.trim() : undefined,
+    since,
+    limit: Math.min(Math.floor(parsedLimit), 1000),
+    cursor: typeof cursorRaw === "string" && cursorRaw.trim() ? cursorRaw.trim() : undefined,
+  };
+}
+
 export function costRoutes(
   db: Db,
   options: { pluginWorkerManager?: PluginWorkerManager } = {},
@@ -86,6 +118,15 @@ export function costRoutes(
     });
 
     res.status(201).json(event);
+  });
+
+  router.get("/companies/:companyId/cost_events", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const query = parseCostEventListQuery(req.query);
+    const result = await costs.listEvents(companyId, query);
+    if (result.nextCursor) res.setHeader("x-next-cursor", result.nextCursor);
+    res.json(result.rows);
   });
 
   router.post("/companies/:companyId/finance-events", validate(createFinanceEventSchema), async (req, res) => {
