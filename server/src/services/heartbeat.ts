@@ -757,6 +757,87 @@ function appendExcerpt(prev: string, chunk: string) {
   return appendWithByteCap(prev, chunk, MAX_EXCERPT_BYTES);
 }
 
+const HEARTBEAT_RUN_ERROR_MAX_CHARS = 1024;
+
+function truncateRunError(value: string | null | undefined) {
+  const trimmed = value?.replace(/\s+$/g, "").trim();
+  if (!trimmed) return null;
+  return trimmed.length <= HEARTBEAT_RUN_ERROR_MAX_CHARS
+    ? trimmed
+    : trimmed.slice(0, HEARTBEAT_RUN_ERROR_MAX_CHARS);
+}
+
+function lastNonEmptyLine(value: string | null | undefined) {
+  if (!value) return null;
+  const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return lines.length > 0 ? lines[lines.length - 1] ?? null : null;
+}
+
+function stringifyErrorValue(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  for (const key of ["message", "error", "code"]) {
+    const field = record[key];
+    if (typeof field === "string" && field.trim()) return field.trim();
+  }
+  try {
+    const json = JSON.stringify(record);
+    return json && json !== "{}" ? json : null;
+  } catch {
+    return null;
+  }
+}
+
+function readStructuredStdoutFailure(value: string | null | undefined) {
+  if (!value) return null;
+  const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(lines[index]!);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const event = parsed as Record<string, unknown>;
+    const type = typeof event.type === "string" ? event.type : "";
+    if (type === "turn.failed") {
+      return stringifyErrorValue(event.error) ?? stringifyErrorValue(event.message) ?? stringifyErrorValue(event);
+    }
+    if (type === "error") {
+      return stringifyErrorValue(event.message) ?? stringifyErrorValue(event.error) ?? stringifyErrorValue(event);
+    }
+    if (event.is_error === true || type.endsWith(".failed")) {
+      const errors = Array.isArray(event.errors)
+        ? event.errors.map(stringifyErrorValue).filter((item): item is string => Boolean(item))
+        : [];
+      return errors[errors.length - 1] ?? stringifyErrorValue(event.error) ?? stringifyErrorValue(event.message);
+    }
+  }
+  return null;
+}
+
+export function deriveHeartbeatRunFailureMessage(input: {
+  exitCode?: number | null;
+  stderrExcerpt?: string | null;
+  stdoutExcerpt?: string | null;
+  adapterErrorMessage?: string | null;
+  resultJson?: Record<string, unknown> | null;
+}) {
+  if ((input.exitCode ?? 0) === 0 && !input.adapterErrorMessage) return null;
+  const resultStderr = typeof input.resultJson?.stderr === "string" ? input.resultJson.stderr : null;
+  const resultStdout = typeof input.resultJson?.stdout === "string" ? input.resultJson.stdout : null;
+  return truncateRunError(
+    lastNonEmptyLine(input.stderrExcerpt)
+    ?? lastNonEmptyLine(resultStderr)
+    ?? readStructuredStdoutFailure(input.stdoutExcerpt)
+    ?? readStructuredStdoutFailure(resultStdout)
+    ?? input.adapterErrorMessage
+    ?? (typeof input.exitCode === "number" ? `Process exited with code ${input.exitCode}` : null),
+  );
+}
+
 function truncateRunEventString(value: string) {
   if (value.length <= MAX_RUN_EVENT_PAYLOAD_STRING_CHARS) return value;
   const omittedChars = value.length - MAX_RUN_EVENT_PAYLOAD_STRING_CHARS;
@@ -5628,13 +5709,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       } else {
         outcome = "failed";
       }
+      const adapterFailureMessage =
+        adapterResult.errorMessage
+        ?? (outcome === "timed_out" ? "Timed out" : null)
+        ?? (outcome === "failed" && typeof adapterResult.exitCode === "number"
+          ? `Process exited with code ${adapterResult.exitCode}`
+          : "Adapter failed");
       const runErrorMessage =
         outcome === "cancelled"
-          ? (latestRun?.error ?? adapterResult.errorMessage ?? "Cancelled")
+          ? (latestRun?.error ?? adapterFailureMessage ?? "Cancelled")
           : outcome === "succeeded"
             ? null
             : redactCurrentUserText(
-                adapterResult.errorMessage ?? (outcome === "timed_out" ? "Timed out" : "Adapter failed"),
+                deriveHeartbeatRunFailureMessage({
+                  exitCode: adapterResult.exitCode,
+                  stderrExcerpt,
+                  stdoutExcerpt,
+                  adapterErrorMessage: adapterFailureMessage,
+                  resultJson: adapterResult.resultJson ?? null,
+                }) ?? adapterFailureMessage,
                 currentUserRedactionOptions,
               );
       const runErrorCode =
